@@ -170,37 +170,53 @@ def save_cache(cache):
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 # Получение matchup с кэшем и retry
+@st.cache_data(ttl=3600)  # кэш на 1 час — повторные запросы мгновенные
 def get_matchups(hero_id):
-    cache = load_cache()
-    hero_str = str(hero_id)
-    if hero_str in cache:
-        return cache[hero_str]
-
-    url = f"https://api.opendota.com/api/heroes/{hero_id}/matchups"
-    for attempt in range(3):
+    # Сначала проверяем локальный кэш (если файл есть)
+    cache_file = "matchup_cache.json"
+    if os.path.exists(cache_file):
         try:
-            resp = requests.get(url, timeout=12)
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            cached = cache.get(str(hero_id))
+            if cached is not None:
+                return cached
+        except:
+            pass
+
+    # Если в кэше нет — делаем запрос с повторами
+    url = f"https://api.opendota.com/api/heroes/{hero_id}/matchups"
+    for attempt in range(4):  # 4 попытки
+        try:
+            resp = requests.get(url, timeout=15)
             if resp.status_code == 429:
-                time.sleep(5 * (attempt + 1))
+                wait_time = 5 * (attempt + 1)
+                st.warning(f"Лимит запросов (429) — ждём {wait_time} сек...")
+                time.sleep(wait_time)
                 continue
             if resp.status_code != 200:
+                st.error(f"Ошибка {resp.status_code} для героя {hero_id}")
                 return {}
             data = resp.json()
             matchups = {}
             for m in data:
                 opp_id = m['hero_id']
                 games = m['games_played']
-                if games > 1:
+                if games > 1:  # уменьшили порог — включаем больше данных
                     winrate = (m['wins'] / games) * 100
                     matchups[opp_id] = {'winrate': winrate, 'games': games}
-            cache[hero_str] = matchups
-            save_cache(cache)
-            time.sleep(2.0)
+            # Сохраняем в кэш
+            cache = load_cache() if os.path.exists(cache_file) else {}
+            cache[str(hero_id)] = matchups
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
             return matchups
-        except:
+        except Exception as e:
+            st.warning(f"Ошибка запроса (попытка {attempt+1}): {str(e)}")
             time.sleep(3)
+    st.error("Не удалось загрузить данные после нескольких попыток")
     return {}
-
+    
 # Рекомендации
 def recommend_heroes(my_role, enemies_names, top_k=7, mode='average'):
     if not (1 <= my_role <= 5):
